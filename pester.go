@@ -63,7 +63,7 @@ type Client struct {
 
 	sync.Mutex
 	ErrLog         []ErrEntry
-	RetryOnHTTP429 bool
+	RetryCheck     func(resp *http.Response) bool
 }
 
 // ErrEntry is used to provide the LogString() data and is populated
@@ -113,7 +113,7 @@ func New() *Client {
 		Backoff:        DefaultClient.Backoff,
 		ErrLog:         DefaultClient.ErrLog,
 		wg:             &sync.WaitGroup{},
-		RetryOnHTTP429: false,
+		RetryCheck:     DefaultClient.RetryCheck,
 	}
 }
 
@@ -136,7 +136,28 @@ type ContextLogHook func(ctx context.Context, e ErrEntry)
 type BackoffStrategy func(retry int) time.Duration
 
 // DefaultClient provides sensible defaults
-var DefaultClient = &Client{Concurrency: 1, MaxRetries: 3, Backoff: DefaultBackoff, ErrLog: []ErrEntry{}}
+var DefaultClient = &Client{
+	Concurrency: 1,
+	MaxRetries: 3,
+	Backoff: DefaultBackoff,
+	ErrLog: []ErrEntry{},
+	RetryCheck: RetryCheckDespite429,
+}
+
+// RetryCheckErrors retries on 5xx status codes and 429
+func RetryCheckErrors(resp *http.Response) bool {
+	return resp.StatusCode < http.StatusInternalServerError && resp.StatusCode != http.StatusTooManyRequests
+}
+
+// RetryCheckDespite429 retries only on 5xx status codes
+func RetryCheckDespite429(resp *http.Response) bool {
+	return resp.StatusCode < http.StatusInternalServerError
+}
+
+// RetryCheckAll retries on any status code other than 2xx
+func RetryCheckAll(resp *http.Response) bool {
+	return resp.StatusCode >= http.StatusOK && resp.StatusCode < http.StatusMultipleChoices
+}
 
 // DefaultBackoff always returns 1 second
 func DefaultBackoff(_ int) time.Duration {
@@ -295,8 +316,7 @@ func (c *Client) pester(p params) (*http.Response, error) {
 
 				resp, err := httpClient.Do(req)
 				// Early return if we have a valid result
-				// Only retry (ie, continue the loop) on 5xx status codes and 429
-				if err == nil && resp.StatusCode < http.StatusInternalServerError && (resp.StatusCode != http.StatusTooManyRequests || (resp.StatusCode == http.StatusTooManyRequests && !c.RetryOnHTTP429)) {
+				if err == nil && c.RetryCheck(resp) {
 					multiplexCh <- result{resp: resp, err: err, req: n, retry: i}
 					return
 				}
@@ -451,7 +471,16 @@ func (c *Client) PostForm(url string, data url.Values) (resp *http.Response, err
 
 // set RetryOnHTTP429 for clients,
 func (c *Client) SetRetryOnHTTP429(flag bool) {
-	c.RetryOnHTTP429 = flag
+	if flag {
+		c.RetryCheck = RetryCheckErrors
+	} else {
+		c.RetryCheck = RetryCheckDespite429
+	}
+}
+
+// set RetryCheck for clients,
+func (c *Client) SetRetryCheck(check func(resp *http.Response) bool) {
+	c.RetryCheck = check
 }
 
 ////////////////////////////////////////

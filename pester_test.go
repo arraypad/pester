@@ -320,6 +320,87 @@ func TestConcurrent2Retry0for429(t *testing.T) {
 	}
 }
 
+func TestConcurrent2RetryForAll(t *testing.T) {
+	t.Parallel()
+
+	c := New()
+	c.Concurrency = 2
+	c.MaxRetries = 0
+	c.KeepLog = true
+	c.SetRetryCheck(RetryCheckAll)
+
+	// Check client retries on 429.
+
+	port, err := serverWith429()
+	if err != nil {
+		t.Fatal("unable to start server", err)
+	}
+
+	url := fmt.Sprintf("http://localhost:%d", port)
+
+	_, getErr := c.Get(url)
+
+	if getErr != nil {
+		t.Fatal("unable to GET", getErr)
+	}
+	c.Wait()
+
+	t.Log("\n", c.LogString())
+	if got, want := c.LogErrCount(), 2; got != want {
+		t.Errorf("got %d attempts, want %d", got, want)
+	}
+
+	// Check client retries on 400.
+
+	port, err = serverWith400()
+	if err != nil {
+		t.Fatal("unable to start server", err)
+	}
+
+	if _, getErr = c.Get(url); getErr != nil {
+		t.Fatal("unable to GET", getErr)
+	}
+	c.Wait()
+
+	t.Log("\n", c.LogString())
+	if got, want := c.LogErrCount(), 4; got != want {
+		t.Errorf("got %d attempts, want %d", got, want)
+	}
+
+	// Check client retries on network error.
+
+	nonExistantURL := "http://localhost:9000/foo"
+
+	if _, err = c.Get(nonExistantURL); err == nil {
+		t.Fatal("expected to get an error")
+	}
+	c.Wait()
+
+	t.Log("\n", c.LogString())
+	if got, want := c.LogErrCount(), 6; got != want {
+		t.Errorf("got %d attempts, want %d", got, want)
+	}
+
+	// Check client succeeds on 200.
+
+	port, err = serverWith200()
+	if err != nil {
+		t.Fatal("unable to start server", err)
+	}
+
+	url = fmt.Sprintf("http://localhost:%d", port)
+
+	if _, getErr = c.Get(url); getErr != nil {
+		t.Fatal("unable to GET", getErr)
+	}
+	c.Wait()
+
+	t.Log("\n", c.LogString())
+	if got, want := c.LogErrCount(), 6; got != want {
+		t.Errorf("got %d attempts, want %d", got, want)
+	}
+}
+
 func TestDefaultBackoff(t *testing.T) {
 	t.Parallel()
 
@@ -857,6 +938,35 @@ func serverWith400() (int, error) {
 
 		w.WriteHeader(http.StatusBadRequest)
 		w.Write([]byte("400 Bad Request"))
+	})
+	l, err := net.Listen("tcp", ":0")
+	if err != nil {
+		return -1, fmt.Errorf("unable to secure listener %v", err)
+	}
+	go func() {
+		if err := http.Serve(l, mux); err != nil {
+			log.Fatalf("slow-server error %v", err)
+		}
+	}()
+
+	var port int
+	_, sport, err := net.SplitHostPort(l.Addr().String())
+	if err == nil {
+		port, err = strconv.Atoi(sport)
+	}
+
+	if err != nil {
+		return -1, fmt.Errorf("unable to determine port %v", err)
+	}
+
+	return port, nil
+}
+
+func serverWith200() (int, error) {
+	mux := http.NewServeMux()
+	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+		w.Write([]byte("200 OK"))
 	})
 	l, err := net.Listen("tcp", ":0")
 	if err != nil {
