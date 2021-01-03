@@ -1,3 +1,3 @@
-module github.com/sethgrid/pester
+module github.com/arraypad/pester
 
 go 1.14
